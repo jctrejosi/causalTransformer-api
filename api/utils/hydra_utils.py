@@ -126,7 +126,8 @@ def save_training_metadata(
     model_type: str,
     overrides: List[str],
     process: subprocess.Popen,
-    run_dir: Path
+    run_dir: Path,
+    celery_task_id: Optional[str] = None  # <--- NUEVO PARÁMETRO
 ) -> Dict[str, Any]:
     """
     Guarda metadatos del entrenamiento
@@ -137,10 +138,13 @@ def save_training_metadata(
         overrides: Overrides usados
         process: Proceso en ejecución
         run_dir: Directorio de la run
+        celery_task_id: ID de la tarea de Celery
     
     Returns:
         Diccionario con metadatos
     """
+    from datetime import datetime
+    
     metadata = {
         "job_id": job_id,
         "model_type": model_type,
@@ -148,7 +152,8 @@ def save_training_metadata(
         "pid": process.pid,
         "run_dir": str(run_dir),
         "status": "running",
-        "created_at": str(process.pid),  # placeholder, usar datetime en real
+        "created_at": datetime.now().isoformat(),
+        "celery_task_id": celery_task_id,  # <--- GUARDAR CELERY_TASK_ID
     }
     
     # Guardar en archivo

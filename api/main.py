@@ -4,6 +4,7 @@ Punto de entrada de la API
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+from fastapi.responses import JSONResponse
 
 from api.routers import train, predict, evaluate
 from api.config import STORAGE_DIR

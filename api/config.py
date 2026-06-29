@@ -4,6 +4,8 @@ Configuración central de la API
 import os
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+load_dotenv()
 
 # Directorio base del proyecto
 BASE_DIR = Path(__file__).parent.parent.parent

@@ -1,57 +1,34 @@
+#!/usr/bin/env python
 """
-Script para probar la API
+Script para iniciar la API
 """
-import requests
-import json
-import time
-import numpy as np
+import sys
+import os
+from pathlib import Path
 
-BASE_URL = "http://localhost:8000"
+# Agregar el directorio raíz al path
+ROOT_DIR = Path(__file__).parent
+sys.path.insert(0, str(ROOT_DIR))
 
-def test_health():
-    response = requests.get(f"{BASE_URL}/health")
-    print("Health:", response.json())
-
-def test_train():
-    payload = {
-        "model_type": "ct",
-        "overrides": [
-            "dataset.num_patients.train=64",
-            "dataset.num_patients.val=10",
-            "exp.max_epochs=2",
-            "exp.gpus=0"
-        ]
-    }
-    response = requests.post(f"{BASE_URL}/train/", json=payload)
-    print("Train response:", response.json())
-    return response.json().get("job_id")
-
-def test_status(job_id):
-    response = requests.get(f"{BASE_URL}/train/{job_id}/status")
-    print("Status:", response.json())
-
-def test_predict(job_id):
-    # Datos de ejemplo para predicción (ajustar según tu modelo)
-    data = {
-        "prev_treatments": [[[0.0, 0.0]]],
-        "current_treatments": [[[1.0, 0.0]]],
-        "static_features": [[0.5, 1.2]],
-        "prev_outputs": [[[20.0]]],
-        "active_entries": [[[1.0]]]
-    }
-    payload = {
-        "run_id": job_id,
-        "model_type": "ct",
-        "data": data,
-        "n_steps": 3
-    }
-    response = requests.post(f"{BASE_URL}/predict/", json=payload)
-    print("Predict:", response.json())
+# Configurar variables de entorno
+os.environ["PYTHONPATH"] = str(ROOT_DIR)
 
 if __name__ == "__main__":
-    test_health()
-    job_id = test_train()
-    time.sleep(5)
-    test_status(job_id)
-    # Si el entrenamiento ya terminó, probar predicción
-    # test_predict(job_id)
+    import uvicorn
+    
+    # Asegurar que los directorios existan
+    from api.config import STORAGE_DIR
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    print("🚀 Iniciando API Causal Transformer...")
+    print(f"📁 Storage dir: {STORAGE_DIR}")
+    print(f"📚 Documentación: http://localhost:8000/docs")
+    print("=" * 50)
+    
+    uvicorn.run(
+        "api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )

@@ -42,7 +42,8 @@ class TrainingService:
         model_type: str, 
         overrides: List[str],
         job_id: Optional[str] = None,
-        force_cpu: bool = False
+        force_cpu: bool = False,
+        celery_task_id: Optional[str] = None  # <--- NUEVO PARÁMETRO
     ) -> str:
         """
         Inicia un entrenamiento
@@ -52,6 +53,7 @@ class TrainingService:
             overrides: Lista de overrides de Hydra
             job_id: ID opcional para el trabajo
             force_cpu: Forzar uso de CPU
+            celery_task_id: ID de la tarea de Celery
         
         Returns:
             job_id: ID del trabajo iniciado
@@ -89,13 +91,20 @@ class TrainingService:
             run_dir=run_dir
         )
         
-        # Guardar metadatos
-        metadata = save_training_metadata(job_id, model_type, full_overrides, process, run_dir)
+        # Guardar metadatos con celery_task_id
+        metadata = save_training_metadata(
+            job_id, 
+            model_type, 
+            full_overrides, 
+            process, 
+            run_dir,
+            celery_task_id  # <--- PASAR EL CELERY_TASK_ID
+        )
         
         # Guardar proceso activo
         self.active_training[job_id] = process
         
-        logger.info(f"Entrenamiento iniciado: {job_id} (modelo: {model_type})")
+        logger.info(f"Entrenamiento iniciado: {job_id} (modelo: {model_type}, celery_task: {celery_task_id})")
         return job_id
     
     def get_status(self, job_id: str) -> Optional[Dict[str, Any]]:
