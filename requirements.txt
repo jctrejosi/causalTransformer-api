@@ -58,7 +58,7 @@ mlflow==3.2.0
 fastapi==0.116.1
 uvicorn==0.35.0
 pydantic==2.11.7
-python-multipart==0.0.20
+python-multipart==0.0.31
 
 # ============================================================
 # CELERY
