@@ -1,0 +1,1761 @@
+----- __init__.py -----
+"""
+API para Causal Transformer - Entrenamiento y predicción de modelos causales
+"""
+----- config.py -----
+"""
+Configuración central de la API
+"""
+import os
+from pathlib import Path
+from typing import Optional
+
+# Directorio base del proyecto
+BASE_DIR = Path(__file__).parent.parent.parent
+API_DIR = Path(__file__).parent
+STORAGE_DIR = API_DIR / "storage"
+MODELS_DIR = STORAGE_DIR / "models"
+RUNS_DIR = STORAGE_DIR / "runs"
+TEMP_DIR = STORAGE_DIR / "temp"
+
+# Crear directorios si no existen
+for dir_path in [STORAGE_DIR, MODELS_DIR, RUNS_DIR, TEMP_DIR]:
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+# Configuración de MLflow
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
+MLFLOW_EXPERIMENT_PREFIX = os.getenv("MLFLOW_EXPERIMENT_PREFIX", "api")
+
+# Configuración de Celery (opcional)
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+
+# Mapeo de tipos de modelo a scripts de entrenamiento
+MODEL_SCRIPT_MAP = {
+    "crn": "train_enc_dec.py",
+    "edct": "train_enc_dec.py",
+    "ct": "train_multi.py",
+    "gnet": "train_gnet.py",
+    "rmsn": "train_rmsn.py",
+    "msm": "train_msm.py"
+}
+
+# Modelos que usan encoder-decoder (requieren entrenamiento secuencial)
+ENCODER_DECODER_MODELS = {"crn", "edct", "rmsn"}
+
+# Modelos que son single-stage
+SINGLE_STAGE_MODELS = {"ct", "gnet", "msm"}
+
+# Mapeo de modelo a su clase (para carga)
+MODEL_CLASS_MAP = {
+    "crn": {
+        "encoder": "src.models.crn.CRNEncoder",
+        "decoder": "src.models.crn.CRNDecoder"
+    },
+    "edct": {
+        "encoder": "src.models.edct.EDCTEncoder",
+        "decoder": "src.models.edct.EDCTDecoder"
+    },
+    "ct": {
+        "multi": "src.models.ct.CT"
+    },
+    "gnet": {
+        "g_net": "src.models.gnet.GNet"
+    },
+    "rmsn": {
+        "encoder": "src.models.rmsn.RMSNEncoder",
+        "decoder": "src.models.rmsn.RMSNDecoder",
+        "propensity_treatment": "src.models.rmsn.RMSNPropensityNetworkTreatment",
+        "propensity_history": "src.models.rmsn.RMSNPropensityNetworkHistory"
+    },
+    "msm": {
+        "msm_regressor": "src.models.msm.MSMRegressor",
+        "propensity_treatment": "src.models.msm.MSMPropensityTreatment",
+        "propensity_history": "src.models.msm.MSMPropensityHistory"
+    }
+}
+----- dependencies.py -----
+"""
+Dependencias compartidas de la API
+"""
+from functools import lru_cache
+from typing import Optional
+
+from api.config import STORAGE_DIR, MLFLOW_TRACKING_URI
+from api.services.trainer import TrainingService
+
+
+@lru_cache()
+def get_training_service() -> TrainingService:
+    """Obtiene la instancia del servicio de entrenamiento"""
+    return TrainingService(runs_dir=STORAGE_DIR / "runs")
+
+
+# No tenemos dependencias de BD por ahora
+----- main.py -----
+"""
+Punto de entrada de la API
+"""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import logging
+
+from api.routers import train, predict, evaluate
+from api.config import STORAGE_DIR
+
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Crear la aplicación FastAPI
+app = FastAPI(
+    title="Causal Transformer API",
+    description="API para entrenamiento y predicción de modelos causales (CRN, EDCT, CT, G-Net, RMSN, MSM)",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# Configurar CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción, especificar orígenes permitidos
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Registrar routers
+app.include_router(train.router)
+app.include_router(predict.router)
+app.include_router(evaluate.router)
+
+
+@app.get("/")
+async def root():
+    """Endpoint raíz"""
+    return {
+        "name": "Causal Transformer API",
+        "version": "1.0.0",
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
+
+
+@app.get("/health")
+async def health():
+    """Health check"""
+    return {
+        "status": "healthy",
+        "storage": str(STORAGE_DIR)
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
+----- run_api.py -----
+#!/usr/bin/env python
+"""
+Script para iniciar la API
+"""
+import sys
+import os
+from pathlib import Path
+
+# Agregar el directorio raíz al path
+ROOT_DIR = Path(__file__).parent
+sys.path.insert(0, str(ROOT_DIR))
+
+# Configurar variables de entorno
+os.environ["PYTHONPATH"] = str(ROOT_DIR)
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    # Asegurar que los directorios existan
+    from api.config import STORAGE_DIR
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    
+    uvicorn.run(
+        "api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
+----- __init__.py -----
+"""
+Routers de la API
+"""
+from api.routers import train, predict, evaluate
+----- evaluate.py -----
+"""
+Endpoints para evaluación de modelos
+"""
+from fastapi import APIRouter, HTTPException
+from typing import Dict, Any, Optional, List
+from pydantic import BaseModel
+import numpy as np
+
+from api.services.evaluator import get_evaluator
+
+router = APIRouter(prefix="/evaluate", tags=["evaluation"])
+
+
+class EvaluateRequest(BaseModel):
+    """Request para evaluación"""
+    run_id: str
+    model_type: str
+    submodel: Optional[str] = None
+    test_data: Dict[str, Any]  # Datos con ground truth (outputs)
+
+
+class EvaluateResponse(BaseModel):
+    """Response para evaluación"""
+    rmse_all: float
+    rmse_orig: Optional[float] = None
+    rmse_last: Optional[float] = None
+    n_step_rmses: Optional[Dict[str, float]] = None
+    metrics: Dict[str, float]
+
+
+class EvaluateNStepRequest(BaseModel):
+    """Request para evaluación multi-step"""
+    run_id: str
+    model_type: str
+    submodel: Optional[str] = None
+    test_data: Dict[str, Any]
+    n_steps: int = 5
+
+
+@router.post("/", response_model=EvaluateResponse)
+async def evaluate_model(request: EvaluateRequest):
+    """
+    Evalúa un modelo entrenado contra datos de test
+    """
+    try:
+        evaluator = get_evaluator(request.run_id, request.model_type, request.submodel)
+        results = evaluator.evaluate(request.test_data)
+        
+        return EvaluateResponse(
+            rmse_all=results.get('rmse_all', 0.0),
+            rmse_orig=results.get('rmse_orig'),
+            rmse_last=results.get('rmse_last'),
+            n_step_rmses=results.get('n_step_rmses', {}),
+            metrics=results.get('metrics', {})
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/n-step", response_model=EvaluateResponse)
+async def evaluate_n_step(request: EvaluateNStepRequest):
+    """
+    Evalúa un modelo en predicción multi-step
+    """
+    try:
+        evaluator = get_evaluator(request.run_id, request.model_type, request.submodel)
+        results = evaluator.evaluate_n_step(request.test_data, request.n_steps)
+        
+        return EvaluateResponse(
+            rmse_all=0.0,  # No aplica para n-step
+            n_step_rmses=results.get('n_step_rmses', {}),
+            metrics=results.get('metrics', {})
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+----- evaulator.py -----
+"""
+Servicio para evaluación de modelos
+"""
+import torch
+import numpy as np
+from typing import Dict, Any, List, Optional, Union
+from pathlib import Path
+import logging
+
+from api.services.predictor import Predictor
+
+logger = logging.getLogger(__name__)
+
+
+class Evaluator:
+    """
+    Clase para evaluar modelos entrenados
+    """
+    
+    def __init__(
+        self,
+        run_id: str,
+        model_type: str,
+        submodel: Optional[str] = None,
+        local_path: Optional[Path] = None
+    ):
+        """
+        Inicializa el evaluador
+        
+        Args:
+            run_id: ID de la run en MLflow
+            model_type: Tipo de modelo
+            submodel: Submodelo a usar
+            local_path: Ruta local de la run
+        """
+        self.run_id = run_id
+        self.model_type = model_type
+        self.submodel = submodel
+        
+        # Usar el predictor para cargar el modelo
+        self.predictor = Predictor(run_id, model_type, submodel, local_path)
+        self.model = self.predictor.model
+        self.config = self.predictor.config
+    
+    def _create_dataset(self, data: Dict[str, Any]):
+        """Crea un dataset temporal para evaluación"""
+        from torch.utils.data import Dataset
+        import torch
+        
+        class EvalDataset(Dataset):
+            def __init__(self, data_dict):
+                self.data = data_dict
+                # Asegurar que todos los arrays tengan las mismas dimensiones
+                first_key = list(data_dict.keys())[0]
+                self.length = len(data_dict[first_key])
+                
+                # Asegurar que exista sequence_lengths
+                if 'sequence_lengths' not in data_dict:
+                    self.data['sequence_lengths'] = np.ones(self.length) * data_dict['active_entries'].shape[1]
+                
+                # Asegurar que exista scaling_params
+                self.scaling_params = None
+                if 'unscaled_outputs' not in data_dict:
+                    self.data['unscaled_outputs'] = data_dict.get('outputs', np.zeros((self.length, 1, 1)))
+            
+            def __len__(self):
+                return self.length
+            
+            def __getitem__(self, idx):
+                return {k: torch.tensor(v[idx]) for k, v in self.data.items() 
+                       if k not in ['sequence_lengths', 'scaling_params', 'unscaled_outputs']}
+        
+        return EvalDataset(data)
+    
+    def evaluate(self, test_data: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Evalúa el modelo en datos de test
+        
+        Args:
+            test_data: Datos con ground truth (debe contener 'outputs' y 'unscaled_outputs')
+        
+        Returns:
+            Diccionario con métricas
+        """
+        # Crear dataset
+        dataset = self._create_dataset(test_data)
+        
+        # Obtener predicciones
+        predictions = self.predictor.predict(test_data)
+        
+        # Obtener ground truth
+        outputs = test_data.get('outputs')
+        if outputs is None:
+            raise ValueError("Los datos de test deben contener 'outputs' (ground truth)")
+        
+        unscaled_outputs = test_data.get('unscaled_outputs', outputs)
+        active_entries = test_data.get('active_entries', np.ones_like(outputs))
+        
+        # Calcular métricas
+        results = {}
+        
+        # RMSE
+        mse = ((predictions - outputs) ** 2) * active_entries
+        mse_all = mse.sum() / active_entries.sum()
+        rmse_all = np.sqrt(mse_all)
+        
+        # Obtener factor de normalización
+        norm_const = getattr(dataset, 'norm_const', 1.0)
+        if hasattr(self.model, 'norm_const'):
+            norm_const = self.model.norm_const
+        
+        # Para modelos BRCausal, calcular RMSE normalizado
+        if hasattr(self.model, 'get_normalised_masked_rmse'):
+            # Usar el método del modelo si está disponible
+            if hasattr(dataset, 'subset_name'):
+                dataset.subset_name = 'test'
+            # Intentar usar el método original
+            try:
+                if hasattr(self.model, 'get_normalised_masked_rmse'):
+                    result = self.model.get_normalised_masked_rmse(dataset)
+                    if isinstance(result, tuple):
+                        if len(result) == 2:
+                            rmse_orig, rmse_all_norm = result
+                            results['rmse_orig'] = float(rmse_orig)
+                            results['rmse_all'] = float(rmse_all_norm)
+                        elif len(result) == 3:
+                            rmse_orig, rmse_all_norm, rmse_last = result
+                            results['rmse_orig'] = float(rmse_orig)
+                            results['rmse_all'] = float(rmse_all_norm)
+                            results['rmse_last'] = float(rmse_last)
+            except Exception as e:
+                logger.warning(f"No se pudo usar get_normalised_masked_rmse: {e}")
+                results['rmse_all'] = float(rmse_all / norm_const)
+        else:
+            # RMSE básico
+            results['rmse_all'] = float(rmse_all)
+            
+            # RMSE por paso temporal
+            time_rmses = np.sqrt(mse.sum(0).sum(-1) / active_entries.sum(0).sum(-1))
+            results['time_rmses'] = [float(x) for x in time_rmses]
+        
+        # Calcular R² si es posible
+        if outputs is not None:
+            ss_tot = ((outputs - outputs.mean()) ** 2 * active_entries).sum()
+            ss_res = mse.sum()
+            if ss_tot > 0:
+                r2 = 1 - (ss_res / ss_tot)
+                results['r2'] = float(r2)
+        
+        return results
+    
+    def evaluate_n_step(self, test_data: Dict[str, Any], n_steps: int = 5) -> Dict[str, float]:
+        """
+        Evalúa el modelo en predicción multi-step
+        
+        Args:
+            test_data: Datos con ground truth
+            n_steps: Número de pasos a predecir
+        
+        Returns:
+            Diccionario con métricas
+        """
+        # Obtener predicciones multi-step
+        predictions = self.predictor.predict_n_step(test_data, n_steps)
+        
+        # Obtener ground truth (debe tener la misma estructura que la predicción)
+        outputs = test_data.get('outputs')
+        if outputs is None:
+            raise ValueError("Los datos de test deben contener 'outputs' (ground truth)")
+        
+        # Si outputs no tiene la dimensión temporal adecuada
+        if len(outputs.shape) == 2:  # (batch, features)
+            outputs = outputs[:, np.newaxis, :]
+        
+        # Asegurar que predictions y outputs tienen la misma dimensión
+        if outputs.shape[1] < predictions.shape[1]:
+            outputs = outputs[:, :predictions.shape[1], :]
+        elif outputs.shape[1] > predictions.shape[1]:
+            predictions = np.pad(predictions, ((0, 0), (0, outputs.shape[1] - predictions.shape[1]), (0, 0)))
+        
+        # Calcular RMSE por paso
+        active_entries = test_data.get('active_entries', np.ones_like(outputs))
+        if len(active_entries.shape) == 2:
+            active_entries = active_entries[:, :, np.newaxis]
+        
+        n_step_rmses = {}
+        for step in range(min(predictions.shape[1], outputs.shape[1])):
+            mse = ((predictions[:, step, :] - outputs[:, step, :]) ** 2) * active_entries[:, step, :]
+            rmse = np.sqrt(mse.sum() / active_entries[:, step, :].sum())
+            n_step_rmses[f'step_{step+1}'] = float(rmse)
+        
+        # Promedio de RMSE
+        avg_rmse = np.mean(list(n_step_rmses.values()))
+        
+        return {
+            'n_step_rmses': n_step_rmses,
+            'avg_rmse': float(avg_rmse),
+            'metrics': {'avg_rmse': float(avg_rmse)}
+        }
+
+
+# Cache de evaluadores
+_evaluator_cache = {}
+
+
+def get_evaluator(
+    run_id: str,
+    model_type: str,
+    submodel: Optional[str] = None,
+    use_cache: bool = True
+) -> Evaluator:
+    """
+    Obtiene un evaluador (con caché)
+    """
+    cache_key = f"{run_id}_{model_type}_{submodel or 'full'}"
+    
+    if use_cache and cache_key in _evaluator_cache:
+        return _evaluator_cache[cache_key]
+    
+    evaluator = Evaluator(run_id, model_type, submodel)
+    _evaluator_cache[cache_key] = evaluator
+    return evaluator
+----- predict.py -----
+"""
+Endpoints para predicciones
+"""
+from fastapi import APIRouter, HTTPException
+from typing import Dict, Any, Optional, List
+from pydantic import BaseModel
+import numpy as np
+
+from api.services.predictor import get_predictor
+
+router = APIRouter(prefix="/predict", tags=["prediction"])
+
+
+class PredictRequest(BaseModel):
+    """Request para predicción"""
+    run_id: str
+    model_type: str
+    submodel: Optional[str] = None
+    data: Dict[str, Any]
+    n_steps: Optional[int] = 1
+
+
+class PredictResponse(BaseModel):
+    """Response para predicción"""
+    predictions: List[List[List[float]]]  # batch, time, features
+    shape: List[int]
+
+
+class PredictOneStepRequest(PredictRequest):
+    """Request para one-step prediction"""
+    pass
+
+
+class PredictNStepRequest(PredictRequest):
+    """Request para multi-step prediction"""
+    n_steps: int
+
+
+@router.post("/", response_model=PredictResponse)
+async def predict(request: PredictRequest):
+    """
+    Realiza predicción con un modelo entrenado    """
+    try:
+        predictor = get_predictor(request.run_id, request.model_type, request.submodel)
+        
+        if request.n_steps > 1:
+            predictions = predictor.predict_n_step(request.data, request.n_steps)
+        else:
+            predictions = predictor.predict(request.data)
+        
+        return PredictResponse(
+            predictions=predictions.tolist(),
+            shape=list(predictions.shape)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/one-step", response_model=PredictResponse)
+async def predict_one_step(request: PredictOneStepRequest):
+    """
+    Realiza predicción one-step-ahead
+    """
+    try:
+        predictor = get_predictor(request.run_id, request.model_type, request.submodel)
+        predictions = predictor.predict_one_step(request.data)
+        
+        return PredictResponse(
+            predictions=predictions.tolist(),
+            shape=list(predictions.shape)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/n-step", response_model=PredictResponse)
+async def predict_n_step(request: PredictNStepRequest):
+    """
+    Realiza predicción multi-step
+    """
+    try:
+        predictor = get_predictor(request.run_id, request.model_type, request.submodel)
+        predictions = predictor.predict_n_step(request.data, request.n_steps)
+        
+        return PredictResponse(
+            predictions=predictions.tolist(),
+            shape=list(predictions.shape)
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/health")
+async def predict_health():
+    """Health check para el servicio de predicción"""
+    return {"status": "ok", "message": "Prediction service is running"}
+----- train.py -----
+"""
+Endpoints para entrenamiento de modelos
+"""
+from fastapi import APIRouter, HTTPException, BackgroundTasks
+from typing import Optional, List
+from pydantic import BaseModel
+
+from api.services.trainer import training_service
+
+router = APIRouter(prefix="/train", tags=["training"])
+
+
+class TrainRequest(BaseModel):
+    """Request para iniciar entrenamiento"""
+    model_type: str  # "crn", "edct", "ct", "gnet", "rmsn", "msm"
+    overrides: Optional[List[str]] = []
+    force_cpu: bool = False
+
+
+class TrainResponse(BaseModel):
+    """Response para inicio de entrenamiento"""
+    job_id: str
+    status: str = "started"
+    message: Optional[str] = None
+
+
+class JobStatusResponse(BaseModel):
+    """Estado de un trabajo"""
+    job_id: str
+    status: str  # "running", "finished", "failed", "unknown"
+    run_dir: Optional[str] = None
+    model_type: Optional[str] = None
+    return_code: Optional[int] = None
+    error: Optional[str] = None
+
+
+class RunsListResponse(BaseModel):
+    """Lista de runs"""
+    runs: List[dict]
+    total: int
+
+
+@router.post("/", response_model=TrainResponse)
+async def start_training(request: TrainRequest, background_tasks: BackgroundTasks):
+    """
+    Inicia un entrenamiento de un modelo causal
+    
+    Ejemplos de overrides:
+    - dataset.num_patients.train=512
+    - exp.max_epochs=50
+    - exp.gpus=1
+    - model.encoder.br_size=64
+    """
+    try:
+        # Iniciar entrenamiento directamente (síncrono pero en background)
+        job_id = training_service.start_training(
+            model_type=request.model_type,
+            overrides=request.overrides,
+            force_cpu=request.force_cpu
+        )
+        
+        return TrainResponse(
+            job_id=job_id,
+            status="started",
+            message=f"Entrenamiento de {request.model_type} iniciado"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{job_id}/status", response_model=JobStatusResponse)
+async def get_training_status(job_id: str):
+    """
+    Obtiene el estado de un entrenamiento
+    """
+    status = training_service.get_status(job_id)
+    if not status:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} no encontrado")
+    
+    return JobStatusResponse(
+        job_id=status.get("job_id", job_id),
+        status=status.get("status", "unknown"),
+        run_dir=status.get("run_dir"),
+        model_type=status.get("model_type"),
+        return_code=status.get("return_code")
+    )
+
+
+@router.get("/{job_id}/config")
+async def get_training_config(job_id: str):
+    """
+    Obtiene la configuración completa de un entrenamiento
+    """
+    config = training_service.get_config(job_id)
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} no encontrado")
+    
+    return config
+
+
+@router.get("/runs", response_model=RunsListResponse)
+async def list_runs(
+    limit: int = 10,
+    model_type: Optional[str] = None
+):
+    """
+    Lista los entrenamientos realizados
+    """
+    runs = training_service.list_runs(limit=limit, model_type=model_type)
+    return RunsListResponse(
+        runs=runs,
+        total=len(runs)
+    )
+----- __init__.py -----
+"""
+Schemas para la API
+"""
+from api.schemas.requests import TrainRequest, PredictRequest, PredictOneStepRequest, PredictNStepRequest
+from api.schemas.responses import TrainResponse, JobStatusResponse, RunsListResponse, PredictResponse
+----- requests.py -----
+"""
+Schemas para requests
+"""
+from pydantic import BaseModel
+from typing import Dict, Any, List, Optional
+
+
+class TrainRequest(BaseModel):
+    """Request para iniciar entrenamiento"""
+    model_type: str
+    overrides: Optional[List[str]] = []
+    force_cpu: bool = False
+
+
+class PredictRequest(BaseModel):
+    """Request base para predicción"""
+    run_id: str
+    model_type: str
+    submodel: Optional[str] = None
+    data: Dict[str, Any]
+    n_steps: Optional[int] = 1
+
+
+class PredictOneStepRequest(PredictRequest):
+    """Request para one-step prediction"""
+    pass
+
+
+class PredictNStepRequest(PredictRequest):
+    """Request para multi-step prediction"""
+    n_steps: int
+----- responses.py -----
+"""
+Schemas para responses
+"""
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+
+
+class TrainResponse(BaseModel):
+    """Response para inicio de entrenamiento"""
+    job_id: str
+    status: str = "started"
+    message: Optional[str] = None
+
+
+class JobStatusResponse(BaseModel):
+    """Estado de un trabajo"""
+    job_id: str
+    status: str
+    run_dir: Optional[str] = None
+    model_type: Optional[str] = None
+    return_code: Optional[int] = None
+    error: Optional[str] = None
+
+
+class RunsListResponse(BaseModel):
+    """Lista de runs"""
+    runs: List[Dict[str, Any]]
+    total: int
+
+
+class PredictResponse(BaseModel):
+    """Response para predicción"""
+    predictions: List[List[List[float]]]
+    shape: List[int]
+----- __init__.py -----
+"""
+Servicios de la API
+"""
+from api.services.trainer import TrainingService, training_service
+from api.services.predictor import Predictor, get_predictor
+from api.services.evaluator import Evaluator, get_evaluator
+----- predictor.py -----
+"""
+Servicio para predicciones con modelos entrenados
+"""
+import torch
+import numpy as np
+from typing import Dict, Any, List, Optional, Union
+from pathlib import Path
+import logging
+from omegaconf import DictConfig
+
+from api.utils.model_loader import load_model_from_run, load_model_from_path
+from api.config import RUNS_DIR
+
+logger = logging.getLogger(__name__)
+
+
+class Predictor:
+    """
+    Clase para realizar predicciones con modelos entrenados
+    """
+    
+    def __init__(
+        self,
+        run_id: str,
+        model_type: str,
+        submodel: Optional[str] = None,
+        local_path: Optional[Path] = None
+    ):
+        """
+        Inicializa el predictor
+        
+        Args:
+            run_id: ID de la run en MLflow
+            model_type: Tipo de modelo
+            submodel: Submodelo a usar (encoder, decoder, etc.)
+            local_path: Ruta local de la run (si no se usa MLflow)
+        """
+        self.run_id = run_id
+        self.model_type = model_type
+        self.submodel = submodel
+        
+        if local_path:
+            self.model, self.config = load_model_from_path(local_path, model_type, submodel)
+        else:
+            self.model, self.config = load_model_from_run(run_id, model_type, submodel)
+        
+        # Determinar si es un modelo encoder-decoder
+        self.is_encoder_decoder = model_type in ["crn", "edct", "rmsn"]
+        
+        # Determinar qué método usar para predicciones
+        if hasattr(self.model, "get_predictions"):
+            self.predict_method = self.model.get_predictions
+        else:
+            self.predict_method = self._predict_forward
+    
+    def _predict_forward(self, dataset) -> np.ndarray:
+        """
+        Método de predicción fallback usando forward
+        """
+        # Crear DataLoader
+        from torch.utils.data import DataLoader
+        loader = DataLoader(dataset, batch_size=32, shuffle=False)
+        
+        predictions = []
+        with torch.no_grad():
+            for batch in loader:
+                # Mover a CPU
+                batch = {k: v.to("cpu") for k, v in batch.items()}
+                # Para modelos BRCausal, forward retorna (treatment_pred, outcome_pred, br)
+                outputs = self.model(batch)
+                if isinstance(outputs, tuple):
+                    outcome_pred = outputs[1]  # outcome_pred
+                else:
+                    outcome_pred = outputs
+                predictions.append(outcome_pred.cpu().numpy())
+        
+        return np.concatenate(predictions, axis=0)
+    
+    def predict(self, data: Dict[str, Any]) -> np.ndarray:
+        """
+        Realiza predicciones sobre nuevos datos
+        
+        Args:
+            data: Diccionario con los datos (formato similar a los datasets)
+            
+        Returns:
+            Array con las predicciones
+        """
+        # Validar que los datos tienen la estructura correcta
+        required_keys = ["prev_treatments", "current_treatments", "static_features"]
+        if self.is_encoder_decoder:
+            required_keys.append("prev_outputs")
+        
+        missing_keys = [k for k in required_keys if k not in data]
+        if missing_keys:
+            raise ValueError(f"Faltan keys requeridas: {missing_keys}")
+        
+        # Convertir a tensores y crear un dataset temporal
+        import torch
+        from torch.utils.data import Dataset
+        
+        class TemporaryDataset(Dataset):
+            def __init__(self, data_dict):
+                self.data = data_dict
+                self.sequence_lengths = data_dict.get('sequence_lengths', 
+                    np.ones(data_dict['active_entries'].shape[0]) * data_dict['active_entries'].shape[1])
+                self.scaling_params = None
+            
+            def __len__(self):
+                return len(self.data['active_entries'])
+            
+            def __getitem__(self, idx):
+                return {k: torch.tensor(v[idx]) for k, v in self.data.items() if k != 'sequence_lengths'}
+        
+        # Asegurar que active_entries existe
+        if 'active_entries' not in data:
+            data['active_entries'] = np.ones(data['prev_treatments'].shape[:2] + (1,))
+        
+        # Crear dataset temporal
+        temp_dataset = TemporaryDataset(data)
+        
+        # Realizar predicción
+        predictions = self.predict_method(temp_dataset)
+        
+        return predictions
+    
+    def predict_one_step(self, data: Dict[str, Any]) -> np.ndarray:
+        """
+        Predicción one-step-ahead
+        """
+        return self.predict(data)
+    
+    def predict_n_step(
+        self, 
+        data: Dict[str, Any], 
+        n_steps: int
+    ) -> np.ndarray:
+        """
+        Predicción multi-step
+        
+        Args:
+            data: Datos de entrada
+            n_steps: Número de pasos a predecir
+        
+        Returns:
+            Array con predicciones de shape (batch, n_steps, output_dim)
+        """
+        # Si el modelo tiene método get_autoregressive_predictions
+        if hasattr(self.model, "get_autoregressive_predictions"):
+            # Preparar dataset para autoregresivo
+            from torch.utils.data import Dataset
+            
+            class TempAutoregDataset(Dataset):
+                def __init__(self, data_dict, n_steps):
+                    self.data = data_dict
+                    self.n_steps = n_steps
+                    self.data_processed_seq = {
+                        'active_entries': np.ones((len(data_dict['active_entries']), n_steps, 1)),
+                        'outputs': data_dict.get('outputs', np.zeros((len(data_dict['active_entries']), n_steps, 1))),
+                        'unscaled_outputs': data_dict.get('outputs', np.zeros((len(data_dict['active_entries']), n_steps, 1)))
+                    }
+                    self.scaling_params = None
+                    self.subset_name = "temp"
+                
+                def __len__(self):
+                    return len(self.data['active_entries'])
+                
+                def __getitem__(self, idx):
+                    return {k: torch.tensor(v[idx]) for k, v in self.data.items()}
+            
+            temp_dataset = TempAutoregDataset(data, n_steps)
+            predictions = self.model.get_autoregressive_predictions(temp_dataset)
+            return predictions
+        
+        # Fallback: predicción iterativa
+        predictions = []
+        current_data = data.copy()
+        
+        for step in range(n_steps):
+            step_pred = self.predict(current_data)
+            predictions.append(step_pred)
+            
+            # Actualizar inputs para el siguiente paso
+            if 'prev_outputs' in current_data:
+                # Desplazar outputs
+                current_data['prev_outputs'] = np.roll(current_data['prev_outputs'], -1, axis=1)
+                current_data['prev_outputs'][:, -1:] = step_pred[:, -1:]
+        
+        return np.stack(predictions, axis=1)
+
+
+# Cache de predictores
+_predictor_cache = {}
+
+
+def get_predictor(
+    run_id: str,
+    model_type: str,
+    submodel: Optional[str] = None,
+    use_cache: bool = True
+) -> Predictor:
+    """
+    Obtiene un predictor (con caché)
+    """
+    cache_key = f"{run_id}_{model_type}_{submodel or 'full'}"
+    
+    if use_cache and cache_key in _predictor_cache:
+        return _predictor_cache[cache_key]
+    
+    predictor = Predictor(run_id, model_type, submodel)
+    _predictor_cache[cache_key] = predictor
+    return predictor
+----- trainer.py -----
+"""
+Servicio para gestionar entrenamientos
+"""
+import uuid
+import logging
+import subprocess
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+
+from api.config import (
+    RUNS_DIR, 
+    MODEL_SCRIPT_MAP, 
+    ENCODER_DECODER_MODELS,
+    SINGLE_STAGE_MODELS
+)
+from api.utils.hydra_utils import (
+    run_hydra_script,
+    load_config_from_run,
+    save_training_metadata,
+    get_job_status as get_status_from_metadata
+)
+
+logger = logging.getLogger(__name__)
+
+
+def generate_job_id() -> str:
+    """Genera un ID único para el trabajo"""
+    return f"job_{uuid.uuid4().hex[:12]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+class TrainingService:
+    """Servicio para gestionar entrenamientos de modelos causales"""
+    
+    def __init__(self, runs_dir: Path = RUNS_DIR):
+        self.runs_dir = runs_dir
+        self.active_training = {}  # job_id -> process
+    
+    def start_training(
+        self, 
+        model_type: str, 
+        overrides: List[str],
+        job_id: Optional[str] = None,
+        force_cpu: bool = False
+    ) -> str:
+        """
+        Inicia un entrenamiento
+        
+        Args:
+            model_type: Tipo de modelo (crn, edct, ct, gnet, rmsn, msm)
+            overrides: Lista de overrides de Hydra
+            job_id: ID opcional para el trabajo
+            force_cpu: Forzar uso de CPU
+        
+        Returns:
+            job_id: ID del trabajo iniciado
+        """
+        # Validar modelo
+        if model_type not in MODEL_SCRIPT_MAP:
+            raise ValueError(f"Modelo no soportado: {model_type}. Opciones: {list(MODEL_SCRIPT_MAP.keys())}")
+        
+        # Generar job_id si no se proporciona
+        if job_id is None:
+            job_id = generate_job_id()
+        
+        # Preparar overrides
+        full_overrides = overrides.copy()
+        
+        # Agregar overrides específicos si es necesario
+        if force_cpu:
+            full_overrides.append("exp.gpus=0")
+        
+        # Asegurar que el job_id se guarde en los metadatos
+        full_overrides.append(f"exp.run_id={job_id}")
+        
+        # Directorio para esta run
+        run_dir = self.runs_dir / job_id
+        if run_dir.exists():
+            logger.warning(f"El directorio {run_dir} ya existe, se sobrescribirá")
+        
+        # Determinar script a ejecutar
+        script_path = MODEL_SCRIPT_MAP[model_type]
+        
+        # Iniciar proceso
+        process = run_hydra_script(
+            script_path=f"runnables/{script_path}",
+            overrides=full_overrides,
+            run_dir=run_dir
+        )
+        
+        # Guardar metadatos
+        metadata = save_training_metadata(job_id, model_type, full_overrides, process, run_dir)
+        
+        # Guardar proceso activo
+        self.active_training[job_id] = process
+        
+        logger.info(f"Entrenamiento iniciado: {job_id} (modelo: {model_type})")
+        return job_id
+    
+    def get_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Obtiene el estado de un entrenamiento
+        
+        Args:
+            job_id: ID del trabajo
+        
+        Returns:
+            Diccionario con el estado o None si no existe
+        """
+        status = get_status_from_metadata(job_id, self.runs_dir)
+        
+        # Verificar si el proceso aún está en active_training
+        if status and status.get("status") == "running":
+            process = self.active_training.get(job_id)
+            if process:
+                # Verificar si el proceso terminó
+                poll_result = process.poll()
+                if poll_result is not None:
+                    status["status"] = "finished"
+                    status["return_code"] = poll_result
+                    # Limpiar proceso activo
+                    del self.active_training[job_id]
+        
+        return status
+    
+    def get_config(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Carga la configuración de una run
+        
+        Args:
+            job_id: ID del trabajo
+        
+        Returns:
+            Configuración como diccionario o None si no existe
+        """
+        run_dir = self.runs_dir / job_id
+        if not run_dir.exists():
+            return None
+        
+        try:
+            config = load_config_from_run(run_dir)
+            return OmegaConf.to_container(config, resolve=True)
+        except Exception as e:
+            logger.error(f"Error cargando configuración de {job_id}: {e}")
+            return None
+    
+    def list_runs(self, limit: int = 10, model_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Lista las runs disponibles
+        
+        Args:
+            limit: Número máximo de runs a listar
+            model_type: Filtrar por tipo de modelo
+        
+        Returns:
+            Lista de runs con metadatos
+        """
+        runs = []
+        for run_dir in sorted(self.runs_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+            if not run_dir.is_dir():
+                continue
+            
+            metadata_path = run_dir / "metadata.yaml"
+            if not metadata_path.exists():
+                continue
+            
+            import yaml
+            with open(metadata_path, "r") as f:
+                metadata = yaml.safe_load(f)
+            
+            # Filtrar por tipo
+            if model_type and metadata.get("model_type") != model_type:
+                continue
+            
+            runs.append(metadata)
+            
+            if len(runs) >= limit:
+                break
+        
+        return runs
+
+
+# Instancia global del servicio
+training_service = TrainingService()
+----- __init__.py -----
+"""
+Tareas asíncronas para la API
+"""
+from api.tasks.celery_tasks import app, train_model_task
+----- celery_task.py -----
+"""
+Tareas de Celery para entrenamiento asíncrono
+"""
+import logging
+from celery import Celery
+from celery.result import AsyncResult
+
+from api.config import CELERY_BROKER_URL, CELERY_RESULT_BACKEND
+from api.services.trainer import training_service
+
+logger = logging.getLogger(__name__)
+
+# Inicializar Celery
+app = Celery(
+    'causal_transformer_tasks',
+    broker=CELERY_BROKER_URL,
+    backend=CELERY_RESULT_BACKEND,
+    include=['api.tasks.celery_tasks']
+)
+
+# Configuración de Celery
+app.conf.update(
+    task_serializer='json',
+    accept_content=['json'],
+    result_serializer='json',
+    timezone='UTC',
+    enable_utc=True,
+    task_track_started=True,
+    task_time_limit=3600 * 24,  # 24 horas máximo
+    task_soft_time_limit=3600 * 23,
+    worker_prefetch_multiplier=1,
+    task_acks_late=True,
+)
+
+
+@app.task(bind=True, name='train_model')
+def train_model_task(self, model_type: str, overrides: list, job_id: str = None):
+    """
+    Tarea de Celery para entrenar un modelo
+    
+    Args:
+        model_type: Tipo de modelo
+        overrides: Overrides de Hydra
+        job_id: ID opcional para el trabajo
+    
+    Returns:
+        Dict con resultados
+    """
+    logger.info(f"Tarea de entrenamiento iniciada: {model_type}, job_id: {job_id}")
+    
+    try:
+        # Iniciar entrenamiento
+        job_id = training_service.start_training(
+            model_type=model_type,
+            overrides=overrides,
+            job_id=job_id
+        )
+        
+        # Actualizar estado de la tarea
+        self.update_state(
+            state='RUNNING',
+            meta={'job_id': job_id, 'status': 'training_started'}
+        )
+        
+        # Esperar a que termine (el proceso se ejecuta en background)
+        # Nota: en producción, se podría hacer polling o usar callbacks
+        import time
+        while True:
+            status = training_service.get_status(job_id)
+            if not status:
+                break
+            if status.get('status') in ['finished', 'failed']:
+                break
+            time.sleep(10)
+        
+        # Obtener resultado final
+        final_status = training_service.get_status(job_id)
+        
+        return {
+            'job_id': job_id,
+            'status': final_status.get('status', 'unknown'),
+            'run_dir': final_status.get('run_dir'),
+            'return_code': final_status.get('return_code')
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en entrenamiento {job_id}: {e}")
+        return {
+            'job_id': job_id,
+            'status': 'failed',
+            'error': str(e)
+        }
+
+
+@app.task(name='get_task_status')
+def get_task_status(task_id: str):
+    """
+    Obtiene el estado de una tarea de Celery
+    
+    Args:
+        task_id: ID de la tarea
+    
+    Returns:
+        Dict con el estado
+    """
+    result = AsyncResult(task_id, app=app)
+    return {
+        'task_id': task_id,
+        'state': result.state,
+        'result': result.result if result.ready() else None,
+        'info': result.info if result.state == 'RUNNING' else None
+    }
+----- __init__.py -----
+"""
+Utilidades de la API
+"""
+from api.utils.hydra_utils import (
+    build_hydra_command,
+    run_hydra_script,
+    load_config_from_run,
+    save_training_metadata,
+    get_job_status,
+    get_model_checkpoint
+)
+from api.utils.model_loader import (
+    load_model_from_run,
+    load_model_from_path,
+    clear_model_cache
+)
+----- hydra_utils.py -----
+"""
+Utilidades para trabajar con Hydra desde código
+"""
+import os
+import sys
+import subprocess
+import tempfile
+import shutil
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+import yaml
+from omegaconf import OmegaConf, DictConfig
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Directorio del proyecto
+PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+
+def build_hydra_command(
+    script_path: str,
+    overrides: List[str],
+    run_dir: Optional[Path] = None,
+    config_name: str = "config.yaml",
+    config_path: str = "../config/"
+) -> List[str]:
+    """
+    Construye el comando para ejecutar un script de Hydra
+    
+    Args:
+        script_path: Ruta al script (relativa a PROJECT_ROOT)
+        overrides: Lista de overrides de Hydra
+        run_dir: Directorio donde guardar los outputs
+        config_name: Nombre del archivo de configuración
+        config_path: Ruta a la carpeta de configuraciones
+    
+    Returns:
+        Lista con el comando para subprocess
+    """
+    # Ruta absoluta al script
+    full_script_path = PROJECT_ROOT / script_path
+    
+    # Verificar que el script existe
+    if not full_script_path.exists():
+        raise FileNotFoundError(f"Script no encontrado: {full_script_path}")
+    
+    cmd = [
+        sys.executable,  # Usar el mismo Python
+        str(full_script_path),
+        f"hydra.run.dir={run_dir}" if run_dir else "",
+        f"hydra.job.name={Path(script_path).stem}",
+    ]
+    
+    # Agregar overrides
+    cmd.extend(overrides)
+    
+    # Filtrar elementos vacíos
+    cmd = [c for c in cmd if c]
+    
+    logger.info(f"Comando Hydra construido: {' '.join(cmd)}")
+    return cmd
+
+
+def run_hydra_script(
+    script_path: str,
+    overrides: List[str],
+    run_dir: Optional[Path] = None,
+    env_vars: Optional[Dict[str, str]] = None,
+    timeout: Optional[int] = None
+) -> subprocess.Popen:
+    """
+    Ejecuta un script de Hydra en un subproceso
+    
+    Args:
+        script_path: Ruta al script
+        overrides: Overrides de Hydra
+        run_dir: Directorio de salida
+        env_vars: Variables de entorno adicionales
+        timeout: Timeout en segundos (opcional)
+    
+    Returns:
+        subprocess.Popen: Proceso en ejecución
+    """
+    cmd = build_hydra_command(script_path, overrides, run_dir)
+    
+    # Preparar entorno
+    env = os.environ.copy()
+    if env_vars:
+        env.update(env_vars)
+    
+    # Ejecutar en background
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        text=True,
+        cwd=PROJECT_ROOT
+    )
+    
+    logger.info(f"Proceso iniciado con PID: {process.pid}")
+    return process
+
+
+def load_config_from_run(run_dir: Path) -> DictConfig:
+    """
+    Carga la configuración de una run de Hydra
+    
+    Args:
+        run_dir: Directorio de la run
+    
+    Returns:
+        DictConfig con la configuración
+    """
+    config_path = run_dir / ".hydra" / "config.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Configuración no encontrada en: {config_path}")
+    
+    config = OmegaConf.load(config_path)
+    return config
+
+
+def save_training_metadata(
+    job_id: str,
+    model_type: str,
+    overrides: List[str],
+    process: subprocess.Popen,
+    run_dir: Path
+) -> Dict[str, Any]:
+    """
+    Guarda metadatos del entrenamiento
+    
+    Args:
+        job_id: ID único del trabajo
+        model_type: Tipo de modelo
+        overrides: Overrides usados
+        process: Proceso en ejecución
+        run_dir: Directorio de la run
+    
+    Returns:
+        Diccionario con metadatos
+    """
+    metadata = {
+        "job_id": job_id,
+        "model_type": model_type,
+        "overrides": overrides,
+        "pid": process.pid,
+        "run_dir": str(run_dir),
+        "status": "running",
+        "created_at": str(process.pid),  # placeholder, usar datetime en real
+    }
+    
+    # Guardar en archivo
+    metadata_path = run_dir / "metadata.yaml"
+    with open(metadata_path, "w") as f:
+        yaml.dump(metadata, f)
+    
+    return metadata
+
+
+def get_job_status(job_id: str, runs_dir: Path) -> Optional[Dict[str, Any]]:
+    """
+    Obtiene el estado de un trabajo
+    
+    Args:
+        job_id: ID del trabajo
+        runs_dir: Directorio donde se guardan las runs
+    
+    Returns:
+        Diccionario con el estado o None si no existe
+    """
+    run_dir = runs_dir / job_id
+    if not run_dir.exists():
+        return None
+    
+    metadata_path = run_dir / "metadata.yaml"
+    if not metadata_path.exists():
+        return {"job_id": job_id, "status": "unknown", "run_dir": str(run_dir)}
+    
+    with open(metadata_path, "r") as f:
+        metadata = yaml.safe_load(f)
+    
+    # Verificar si el proceso sigue vivo
+    if metadata.get("status") == "running":
+        pid = metadata.get("pid")
+        if pid:
+            try:
+                # Verificar si el proceso aún existe
+                os.kill(pid, 0)
+            except OSError:
+                metadata["status"] = "finished"
+                # Actualizar metadata
+                with open(metadata_path, "w") as f:
+                    yaml.dump(metadata, f)
+        else:
+            metadata["status"] = "unknown"
+    
+    return metadata
+
+
+def get_model_checkpoint(run_dir: Path, model_type: str) -> Optional[Path]:
+    """
+    Encuentra el checkpoint del modelo en el directorio de la run
+    
+    Args:
+        run_dir: Directorio de la run
+        model_type: Tipo de modelo
+    
+    Returns:
+        Path al checkpoint o None si no se encuentra
+    """
+    checkpoints_dir = run_dir / "checkpoints"
+    if not checkpoints_dir.exists():
+        return None
+    
+    # Buscar el último checkpoint
+    checkpoints = list(checkpoints_dir.glob("*.ckpt"))
+    if not checkpoints:
+        return None
+    
+    # Ordenar por fecha de modificación
+    checkpoints.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    return checkpoints[0]
+----- model_loader.py -----
+"""
+Carga de modelos entrenados
+"""
+import os
+import tempfile
+import shutil
+from pathlib import Path
+from typing import Optional, Dict, Any, Union, Tuple
+import torch
+import mlflow
+from mlflow.tracking import MlflowClient
+from omegaconf import OmegaConf, DictConfig
+import logging
+
+from api.config import MODELS_DIR, MODEL_CLASS_MAP, MLFLOW_TRACKING_URI
+
+logger = logging.getLogger(__name__)
+
+# Cache de modelos cargados
+_model_cache = {}
+
+
+def load_model_from_run(
+    run_id: str,
+    model_type: str,
+    submodel: Optional[str] = None,
+    use_cache: bool = True
+) -> Tuple[torch.nn.Module, DictConfig]:
+    """
+    Carga un modelo desde una run de MLflow
+    
+    Args:
+        run_id: ID de la run en MLflow
+        model_type: Tipo de modelo
+        submodel: Submodelo a cargar (encoder, decoder, etc.)
+        use_cache: Usar caché
+    
+    Returns:
+        Tuple de (modelo, configuración)
+    """
+    cache_key = f"{run_id}_{model_type}_{submodel or 'full'}"
+    
+    if use_cache and cache_key in _model_cache:
+        logger.info(f"Modelo {cache_key} cargado desde caché")
+        return _model_cache[cache_key]
+    
+    # Conectar a MLflow
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+    client = MlflowClient()
+    
+    # Obtener información de la run
+    run = client.get_run(run_id)
+    if not run:
+        raise ValueError(f"Run {run_id} no encontrada en MLflow")
+    
+    # Descargar artefactos a un directorio temporal
+    temp_dir = tempfile.mkdtemp(prefix=f"model_{run_id}_")
+    
+    try:
+        # Descargar configuración
+        config_local = client.download_artifacts(run_id, ".hydra/config.yaml", dst_path=temp_dir)
+        config_path = Path(config_local)
+        config = OmegaConf.load(config_path)
+        
+        # Descargar checkpoints
+        checkpoints_dir = Path(temp_dir) / "checkpoints"
+        client.download_artifacts(run_id, "checkpoints", dst_path=temp_dir)
+        
+        # Buscar el checkpoint más reciente
+        checkpoints = list(checkpoints_dir.glob("*.ckpt"))
+        if not checkpoints:
+            raise FileNotFoundError(f"No se encontraron checkpoints para run {run_id}")
+        
+        checkpoints.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        checkpoint_path = checkpoints[0]
+        
+        # Construir el nombre de la clase del modelo
+        model_class_map = MODEL_CLASS_MAP.get(model_type, {})
+        class_path = None
+        
+        if submodel:
+            class_path = model_class_map.get(submodel)
+        else:
+            # Para single-stage models (CT, GNet) o tomar el primero disponible
+            if "multi" in model_class_map:
+                class_path = model_class_map["multi"]
+            elif "g_net" in model_class_map:
+                class_path = model_class_map["g_net"]
+            elif "msm_regressor" in model_class_map:
+                class_path = model_class_map["msm_regressor"]
+            else:
+                # Para encoder-decoder, cargar encoder por defecto
+                class_path = model_class_map.get("encoder")
+        
+        if not class_path:
+            raise ValueError(f"No se pudo determinar la clase para modelo {model_type}")
+        
+        # Importar dinámicamente la clase
+        module_path, class_name = class_path.rsplit(".", 1)
+        import importlib
+        module = importlib.import_module(module_path)
+        model_class = getattr(module, class_name)
+        
+        # Cargar modelo desde checkpoint
+        # Nota: para LightningModule, usamos load_from_checkpoint
+        model = model_class.load_from_checkpoint(
+            checkpoint_path=str(checkpoint_path),
+            args=config,
+            map_location=torch.device("cpu"),
+            strict=False
+        )
+        model.eval()
+        
+        # Guardar en caché
+        _model_cache[cache_key] = (model, config)
+        
+        logger.info(f"Modelo {cache_key} cargado exitosamente desde {checkpoint_path}")
+        return model, config
+        
+    except Exception as e:
+        logger.error(f"Error cargando modelo {run_id}: {e}")
+        # Limpiar directorio temporal
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+
+
+def load_model_from_path(
+    run_dir: Path,
+    model_type: str,
+    submodel: Optional[str] = None,
+    use_cache: bool = True
+) -> Tuple[torch.nn.Module, DictConfig]:
+    """
+    Carga un modelo desde un directorio local
+    
+    Args:
+        run_dir: Directorio de la run
+        model_type: Tipo de modelo
+        submodel: Submodelo a cargar
+        use_cache: Usar caché
+    
+    Returns:
+        Tuple de (modelo, configuración)
+    """
+    cache_key = f"local_{run_dir}_{model_type}_{submodel or 'full'}"
+    
+    if use_cache and cache_key in _model_cache:
+        logger.info(f"Modelo {cache_key} cargado desde caché")
+        return _model_cache[cache_key]
+    
+    run_dir = Path(run_dir)
+    
+    # Cargar configuración
+    config_path = run_dir / ".hydra" / "config.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Configuración no encontrada en {config_path}")
+    
+    config = OmegaConf.load(config_path)
+    
+    # Buscar checkpoints
+    checkpoints_dir = run_dir / "checkpoints"
+    if not checkpoints_dir.exists():
+        raise FileNotFoundError(f"Directorios de checkpoints no encontrado en {checkpoints_dir}")
+    
+    checkpoints = list(checkpoints_dir.glob("*.ckpt"))
+    if not checkpoints:
+        raise FileNotFoundError(f"No se encontraron checkpoints en {checkpoints_dir}")
+    
+    checkpoints.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    checkpoint_path = checkpoints[0]
+    
+    # Obtener clase del modelo
+    model_class_map = MODEL_CLASS_MAP.get(model_type, {})
+    class_path = None
+    
+    if submodel:
+        class_path = model_class_map.get(submodel)
+    else:
+        if "multi" in model_class_map:
+            class_path = model_class_map["multi"]
+        elif "g_net" in model_class_map:
+            class_path = model_class_map["g_net"]
+        elif "msm_regressor" in model_class_map:
+            class_path = model_class_map["msm_regressor"]
+        else:
+            class_path = model_class_map.get("encoder")
+    
+    if not class_path:
+        raise ValueError(f"No se pudo determinar la clase para modelo {model_type}")
+    
+    # Importar y cargar
+    module_path, class_name = class_path.rsplit(".", 1)
+    import importlib
+    module = importlib.import_module(module_path)
+    model_class = getattr(module, class_name)
+    
+    model = model_class.load_from_checkpoint(
+        checkpoint_path=str(checkpoint_path),
+        args=config,
+        map_location=torch.device("cpu"),
+        strict=False
+    )
+    model.eval()
+    
+    _model_cache[cache_key] = (model, config)
+    return model, config
+
+
+def clear_model_cache():
+    """Limpia la caché de modelos"""
+    _model_cache.clear()
+    logger.info("Caché de modelos limpiada")

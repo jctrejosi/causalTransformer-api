@@ -1,0 +1,13 @@
+FastAPI
+uvicorn
+pydantic
+redis
+celery
+hydra-core
+joblib
+scikit-learn
+torch
+numpy
+matplotlib
+seaborn
+tqdm
