@@ -13,7 +13,7 @@ python-dotenv==1.1.1
 # MACHINE LEARNING / DEEP LEARNING
 # ============================================================
 
-torch==2.7.1
+torch==2.12.1
 torchmetrics==1.8.1
 pytorch-lightning==2.5.3
 scikit-learn==1.7.1
