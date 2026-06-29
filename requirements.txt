@@ -15,7 +15,7 @@ python-dotenv==1.1.1
 
 torch==2.7.1
 torchmetrics==1.8.1
-pytorch-lightning==2.5.3
+pytorch-lightning==2.6.1
 scikit-learn==1.7.1
 
 # ============================================================
