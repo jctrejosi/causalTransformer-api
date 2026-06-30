@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 import numpy as np
 
-from api.services.evaulator import get_evaluator
+from api.services.evaluator import get_evaluator
 
 router = APIRouter(prefix="/evaluate", tags=["evaluation"])
 

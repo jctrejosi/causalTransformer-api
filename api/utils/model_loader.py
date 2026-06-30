@@ -11,6 +11,7 @@ import mlflow
 from mlflow.tracking import MlflowClient
 from omegaconf import OmegaConf, DictConfig
 import logging
+import yaml
 
 from api.config import MODELS_DIR, MODEL_CLASS_MAP, MLFLOW_TRACKING_URI
 
@@ -111,11 +112,19 @@ def load_model_from_run(
         )
         model.eval()
         
-        # Guardar en caché
-        _model_cache[cache_key] = (model, config)
+         # Intentar cargar parámetros de escala
+        scaling_params = None
+        scaling_params_path = Path(temp_dir) / "scaling_params.yaml"
+        if scaling_params_path.exists():
+            with open(scaling_params_path, 'r') as f:
+                scaling_params = yaml.safe_load(f)
+            logger.info(f"Parámetros de escala cargados desde {scaling_params_path}")
+        
+        # Guardar en caché incluyendo scaling_params
+        _model_cache[cache_key] = (model, config, scaling_params)
         
         logger.info(f"Modelo {cache_key} cargado exitosamente desde {checkpoint_path}")
-        return model, config
+        return model, config, scaling_params
         
     except Exception as e:
         logger.error(f"Error cargando modelo {run_id}: {e}")
@@ -202,8 +211,16 @@ def load_model_from_path(
     )
     model.eval()
     
-    _model_cache[cache_key] = (model, config)
-    return model, config
+    # Intentar cargar parámetros de escala
+    scaling_params = None
+    scaling_params_path = run_dir / "scaling_params.yaml"
+    if scaling_params_path.exists():
+        with open(scaling_params_path, 'r') as f:
+            scaling_params = yaml.safe_load(f)
+        logger.info(f"Parámetros de escala cargados desde {scaling_params_path}")
+    
+    _model_cache[cache_key] = (model, config, scaling_params)
+    return model, config, scaling_params
 
 
 def clear_model_cache():

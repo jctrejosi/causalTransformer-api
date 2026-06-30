@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from pytorch_lightning import Trainer
 from pytorch_lightning.utilities.seed import seed_everything
 from pytorch_lightning.callbacks import LearningRateMonitor
+import yaml
 
 from src.models.utils import AlphaRise, FilteringMlFlowLogger
 
@@ -134,7 +135,31 @@ def main(args: DictConfig):
         decoder_results.update({('decoder_test_rmse_' + k): v for (k, v) in test_rmses.items()})
 
         mlf_logger.log_metrics(decoder_results) if args.exp.logging else None
+
         results.update(decoder_results)
+        # Guardar parámetros de escala en el directorio de la run
+        if hasattr(dataset_collection, 'train_scaling_params'):
+            scaling_params = dataset_collection.train_scaling_params
+            # Para datasets sintéticos, es una tupla (mean, std); para reales, es un dict.
+            # Convertir a formato serializable
+            if isinstance(scaling_params, tuple):
+                mean, std = scaling_params
+                # Convertir Series a dict si es necesario
+                if hasattr(mean, 'to_dict'):
+                    mean = mean.to_dict()
+                    std = std.to_dict()
+                scaling_params = {'mean': mean, 'std': std}
+            elif isinstance(scaling_params, dict):
+                # Ya es un dict, pero asegurar que tenga las keys correctas
+                pass
+            else:
+                # Intentar extraer de train_f si existe
+                if hasattr(dataset_collection, 'train_f') and hasattr(dataset_collection.train_f, 'scaling_params'):
+                    scaling_params = dataset_collection.train_f.scaling_params
+
+        # Guardar
+        with open('scaling_params.yaml', 'w') as f:
+            yaml.dump(scaling_params, f)
 
     return results
 

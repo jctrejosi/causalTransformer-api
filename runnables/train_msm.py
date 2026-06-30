@@ -4,6 +4,8 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import instantiate
 from pytorch_lightning.utilities.seed import seed_everything
+import yaml
+import joblib
 
 from src.models.utils import FilteringMlFlowLogger
 from src.models.msm import MSM
@@ -62,6 +64,7 @@ def main(args: DictConfig):
     msm_regressor = instantiate(args.model.msm_regressor, args, propensity_treatment, propensity_history, dataset_collection,
                                 _recursive_=False)
     mlf_logger.log_hyperparams(msm_regressor.hparams)
+    joblib.dump(msm_regressor, 'msm_regressor.joblib')
     msm_regressor.fit()
     encoder_results = {}
 
@@ -104,6 +107,30 @@ def main(args: DictConfig):
     results.update(decoder_results)
 
     mlf_logger.experiment.set_terminated(mlf_logger.run_id) if args.exp.logging else None
+
+    # Guardar parámetros de escala en el directorio de la run
+    if hasattr(dataset_collection, 'train_scaling_params'):
+        scaling_params = dataset_collection.train_scaling_params
+        # Para datasets sintéticos, es una tupla (mean, std); para reales, es un dict.
+        # Convertir a formato serializable
+        if isinstance(scaling_params, tuple):
+            mean, std = scaling_params
+            # Convertir Series a dict si es necesario
+            if hasattr(mean, 'to_dict'):
+                mean = mean.to_dict()
+                std = std.to_dict()
+            scaling_params = {'mean': mean, 'std': std}
+        elif isinstance(scaling_params, dict):
+            # Ya es un dict, pero asegurar que tenga las keys correctas
+            pass
+        else:
+            # Intentar extraer de train_f si existe
+            if hasattr(dataset_collection, 'train_f') and hasattr(dataset_collection.train_f, 'scaling_params'):
+                scaling_params = dataset_collection.train_f.scaling_params
+        
+        # Guardar
+        with open('scaling_params.yaml', 'w') as f:
+            yaml.dump(scaling_params, f)
 
     return results
 

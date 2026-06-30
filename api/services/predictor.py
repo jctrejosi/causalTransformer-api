@@ -28,49 +28,62 @@ class Predictor:
     ):
         """
         Inicializa el predictor
-        
-        Args:
-            run_id: ID de la run en MLflow
-            model_type: Tipo de modelo
-            submodel: Submodelo a usar (encoder, decoder, etc.)
-            local_path: Ruta local de la run (si no se usa MLflow)
         """
         self.run_id = run_id
         self.model_type = model_type
         self.submodel = submodel
         
         if local_path:
-            self.model, self.config = load_model_from_path(local_path, model_type, submodel)
+            model, config, scaling_params = load_model_from_path(local_path, model_type, submodel)
         else:
-            self.model, self.config = load_model_from_run(run_id, model_type, submodel)
+            model, config, scaling_params = load_model_from_run(run_id, model_type, submodel)
+        
+        self.model = model
+        self.config = config
+        self.scaling_params = scaling_params  # dict con 'output_means' y 'output_stds'
         
         # Determinar si es un modelo encoder-decoder
         self.is_encoder_decoder = model_type in ["crn", "edct", "rmsn"]
         
+        # Definir extractor de outcome según tipo de modelo
+        if model_type == "rmsn" and submodel == "encoder":
+            # RMSNEncoder retorna (outcome_pred, r)
+            self.outcome_extractor = lambda out: out[0]
+        elif model_type == "gnet":
+            # GNet retorna directamente el tensor (vitals_outcome_pred)
+            self.outcome_extractor = lambda out: out
+        elif model_type == "msm_regressor":
+            # MSMRegressor no tiene forward, pero usaremos su método predict
+            self.outcome_extractor = None
+        elif model_type in ["crn", "edct", "ct"]:
+            # Estos retornan (treatment, outcome, br)
+            self.outcome_extractor = lambda out: out[1]
+        else:
+            # Fallback genérico
+            self.outcome_extractor = lambda out: out[1] if isinstance(out, tuple) else out
+        
         # Determinar qué método usar para predicciones
-        if hasattr(self.model, "get_predictions"):
+        if hasattr(self.model, "get_predictions") and model_type != "msm_regressor":
             self.predict_method = self.model.get_predictions
         else:
             self.predict_method = self._predict_forward
     
     def _predict_forward(self, dataset) -> np.ndarray:
         """
-        Método de predicción fallback usando forward
+        Método de predicción usando forward
         """
-        # Crear DataLoader
         from torch.utils.data import DataLoader
         loader = DataLoader(dataset, batch_size=32, shuffle=False)
         
         predictions = []
         with torch.no_grad():
             for batch in loader:
-                # Mover a CPU
                 batch = {k: v.to("cpu") for k, v in batch.items()}
-                # Para modelos BRCausal, forward retorna (treatment_pred, outcome_pred, br)
                 outputs = self.model(batch)
-                if isinstance(outputs, tuple):
-                    outcome_pred = outputs[1]  # outcome_pred
+                if self.outcome_extractor is not None:
+                    outcome_pred = self.outcome_extractor(outputs)
                 else:
+                    # Para MSM, no debería llegar aquí porque usamos predict directamente
                     outcome_pred = outputs
                 predictions.append(outcome_pred.cpu().numpy())
         
@@ -79,12 +92,6 @@ class Predictor:
     def predict(self, data: Dict[str, Any]) -> np.ndarray:
         """
         Realiza predicciones sobre nuevos datos
-        
-        Args:
-            data: Diccionario con los datos (formato similar a los datasets)
-            
-        Returns:
-            Array con las predicciones
         """
         # Validar que los datos tienen la estructura correcta
         required_keys = ["prev_treatments", "current_treatments", "static_features"]
@@ -95,16 +102,21 @@ class Predictor:
         if missing_keys:
             raise ValueError(f"Faltan keys requeridas: {missing_keys}")
         
-        # Convertir a tensores y crear un dataset temporal
+        # Asegurar que active_entries existe
+        if 'active_entries' not in data:
+            data['active_entries'] = np.ones(data['prev_treatments'].shape[:2] + (1,))
+        
+        # Crear dataset temporal
         import torch
         from torch.utils.data import Dataset
         
         class TemporaryDataset(Dataset):
-            def __init__(self, data_dict):
+            def __init__(self, data_dict, scaling_params=None):
                 self.data = data_dict
                 self.sequence_lengths = data_dict.get('sequence_lengths', 
                     np.ones(data_dict['active_entries'].shape[0]) * data_dict['active_entries'].shape[1])
-                self.scaling_params = None
+                self.scaling_params = scaling_params
+                self.norm_const = 1.0  # Valor por defecto, no usado en predicción
             
             def __len__(self):
                 return len(self.data['active_entries'])
@@ -112,53 +124,47 @@ class Predictor:
             def __getitem__(self, idx):
                 return {k: torch.tensor(v[idx]) for k, v in self.data.items() if k != 'sequence_lengths'}
         
-        # Asegurar que active_entries existe
-        if 'active_entries' not in data:
-            data['active_entries'] = np.ones(data['prev_treatments'].shape[:2] + (1,))
-        
-        # Crear dataset temporal
-        temp_dataset = TemporaryDataset(data)
+        temp_dataset = TemporaryDataset(data, scaling_params=self.scaling_params)
         
         # Realizar predicción
-        predictions = self.predict_method(temp_dataset)
-
+        if self.model_type == "msm_regressor":
+            # MSM: usar método get_predictions directamente
+            predictions = self.model.get_predictions(temp_dataset)
+        else:
+            predictions = self.predict_method(temp_dataset)
+        
         # Desnormalizar si hay parámetros de escala
-        if hasattr(temp_dataset, 'scaling_params') and temp_dataset.scaling_params is not None:
-            output_stds = temp_dataset.scaling_params.get('output_stds')
-            output_means = temp_dataset.scaling_params.get('output_means')
-            if output_stds is not None and output_means is not None:
-                predictions = predictions * output_stds + output_means
+        if self.scaling_params is not None:
+            output_means = self.scaling_params.get('output_means')
+            output_stds = self.scaling_params.get('output_stds')
+            if output_means is not None and output_stds is not None:
+                # Asegurar que las dimensiones coinciden
+                if isinstance(output_means, (list, np.ndarray)):
+                    output_means = np.array(output_means)
+                    output_stds = np.array(output_stds)
+                    # Expandir dimensiones si es necesario (batch, time, features)
+                    if predictions.ndim == 3 and output_means.ndim == 1:
+                        predictions = predictions * output_stds[np.newaxis, np.newaxis, :] + output_means[np.newaxis, np.newaxis, :]
+                    else:
+                        predictions = predictions * output_stds + output_means
+                else:
+                    # Escalares
+                    predictions = predictions * output_stds + output_means
         
         return predictions
     
     def predict_one_step(self, data: Dict[str, Any]) -> np.ndarray:
-        """
-        Predicción one-step-ahead
-        """
+        """Predicción one-step-ahead"""
         return self.predict(data)
     
-    def predict_n_step(
-        self, 
-        data: Dict[str, Any], 
-        n_steps: int
-    ) -> np.ndarray:
-        """
-        Predicción multi-step
-        
-        Args:
-            data: Datos de entrada
-            n_steps: Número de pasos a predecir
-        
-        Returns:
-            Array con predicciones de shape (batch, n_steps, output_dim)
-        """
+    def predict_n_step(self, data: Dict[str, Any], n_steps: int) -> np.ndarray:
+        """Predicción multi-step"""
         # Si el modelo tiene método get_autoregressive_predictions
-        if hasattr(self.model, "get_autoregressive_predictions"):
-            # Preparar dataset para autoregresivo
+        if hasattr(self.model, "get_autoregressive_predictions") and self.model_type != "msm_regressor":
             from torch.utils.data import Dataset
             
             class TempAutoregDataset(Dataset):
-                def __init__(self, data_dict, n_steps):
+                def __init__(self, data_dict, n_steps, scaling_params=None):
                     self.data = data_dict
                     self.n_steps = n_steps
                     self.data_processed_seq = {
@@ -166,8 +172,9 @@ class Predictor:
                         'outputs': data_dict.get('outputs', np.zeros((len(data_dict['active_entries']), n_steps, 1))),
                         'unscaled_outputs': data_dict.get('outputs', np.zeros((len(data_dict['active_entries']), n_steps, 1)))
                     }
-                    self.scaling_params = None
+                    self.scaling_params = scaling_params
                     self.subset_name = "temp"
+                    self.norm_const = 1.0
                 
                 def __len__(self):
                     return len(self.data['active_entries'])
@@ -175,24 +182,30 @@ class Predictor:
                 def __getitem__(self, idx):
                     return {k: torch.tensor(v[idx]) for k, v in self.data.items()}
             
-            temp_dataset = TempAutoregDataset(data, n_steps)
+            temp_dataset = TempAutoregDataset(data, n_steps, scaling_params=self.scaling_params)
             predictions = self.model.get_autoregressive_predictions(temp_dataset)
+            # Desnormalizar
+            if self.scaling_params is not None:
+                output_means = self.scaling_params.get('output_means')
+                output_stds = self.scaling_params.get('output_stds')
+                if output_means is not None and output_stds is not None:
+                    if predictions.ndim == 3 and isinstance(output_means, (list, np.ndarray)):
+                        output_means = np.array(output_means)
+                        output_stds = np.array(output_stds)
+                        predictions = predictions * output_stds[np.newaxis, np.newaxis, :] + output_means[np.newaxis, np.newaxis, :]
+                    else:
+                        predictions = predictions * output_stds + output_means
             return predictions
         
         # Fallback: predicción iterativa
         predictions = []
         current_data = data.copy()
-        
         for step in range(n_steps):
             step_pred = self.predict(current_data)
             predictions.append(step_pred)
-            
-            # Actualizar inputs para el siguiente paso
             if 'prev_outputs' in current_data:
-                # Desplazar outputs
                 current_data['prev_outputs'] = np.roll(current_data['prev_outputs'], -1, axis=1)
                 current_data['prev_outputs'][:, -1:] = step_pred[:, -1:]
-        
         return np.stack(predictions, axis=1)
 
 
@@ -206,11 +219,8 @@ def get_predictor(
     submodel: Optional[str] = None,
     use_cache: bool = True
 ) -> Predictor:
-    """
-    Obtiene un predictor (con caché)
-    """
+    """Obtiene un predictor (con caché)"""
     cache_key = f"{run_id}_{model_type}_{submodel or 'full'}"
-    
     if use_cache and cache_key in _predictor_cache:
         return _predictor_cache[cache_key]
     
