@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional
 class TrainResponse(BaseModel):
     """Response para inicio de entrenamiento"""
     job_id: str
+    celery_task_id: str
     status: str = "started"
     message: Optional[str] = None
 

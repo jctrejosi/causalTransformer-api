@@ -12,6 +12,8 @@ from mlflow.tracking import MlflowClient
 from omegaconf import OmegaConf, DictConfig
 import logging
 import yaml
+import joblib
+import importlib
 
 from api.config import MODELS_DIR, MODEL_CLASS_MAP, MLFLOW_TRACKING_URI
 
@@ -96,9 +98,34 @@ def load_model_from_run(
         if not class_path:
             raise ValueError(f"No se pudo determinar la clase para modelo {model_type}")
         
+        # Si es MSM, cargar desde joblib
+        if model_type == "msm":
+            # Buscar archivo joblib en el directorio temporal
+            msm_path = Path(temp_dir) / "msm_regressor.joblib"
+            if not msm_path.exists():
+                # Buscar en el directorio de artefactos descargado (si se descargó como archivo)
+                for root, _, files in os.walk(temp_dir):
+                    if "msm_regressor.joblib" in files:
+                        msm_path = Path(root) / "msm_regressor.joblib"
+                        break
+            if msm_path.exists():
+                model = joblib.load(msm_path)
+                # model ya está listo
+            else:
+                raise FileNotFoundError("No se encontró el archivo msm_regressor.joblib en los artefactos.")
+            
+            # Cargar scaling_params si existe
+            scaling_params = None
+            scaling_params_path = Path(temp_dir) / "scaling_params.yaml"
+            if scaling_params_path.exists():
+                with open(scaling_params_path, 'r') as f:
+                    scaling_params = yaml.safe_load(f)
+            
+            _model_cache[cache_key] = (model, config, scaling_params)
+            return model, config, scaling_params
+        
         # Importar dinámicamente la clase
         module_path, class_name = class_path.rsplit(".", 1)
-        import importlib
         module = importlib.import_module(module_path)
         model_class = getattr(module, class_name)
         
@@ -197,6 +224,28 @@ def load_model_from_path(
     if not class_path:
         raise ValueError(f"No se pudo determinar la clase para modelo {model_type}")
     
+    if model_type == "msm":
+        msm_path = run_dir / "msm_regressor.joblib"
+        if not msm_path.exists():
+            # Buscar en subdirectorios (por si se guardó en otro lado)
+            for root, dirs, files in os.walk(run_dir):
+                if "msm_regressor.joblib" in files:
+                    msm_path = Path(root) / "msm_regressor.joblib"
+                    break
+        if msm_path.exists():
+            model = joblib.load(msm_path)
+        else:
+            raise FileNotFoundError("No se encontró msm_regressor.joblib")
+        
+        scaling_params = None
+        scaling_params_path = run_dir / "scaling_params.yaml"
+        if scaling_params_path.exists():
+            with open(scaling_params_path, 'r') as f:
+                scaling_params = yaml.safe_load(f)
+        
+        _model_cache[cache_key] = (model, config, scaling_params)
+        return model, config, scaling_params
+
     # Importar y cargar
     module_path, class_name = class_path.rsplit(".", 1)
     import importlib

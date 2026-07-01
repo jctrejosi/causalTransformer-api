@@ -52,7 +52,7 @@ class Predictor:
         elif model_type == "gnet":
             # GNet retorna directamente el tensor (vitals_outcome_pred)
             self.outcome_extractor = lambda out: out
-        elif model_type == "msm_regressor":
+        elif model_type == "msm":
             # MSMRegressor no tiene forward, pero usaremos su método predict
             self.outcome_extractor = None
         elif model_type in ["crn", "edct", "ct"]:
@@ -63,7 +63,7 @@ class Predictor:
             self.outcome_extractor = lambda out: out[1] if isinstance(out, tuple) else out
         
         # Determinar qué método usar para predicciones
-        if hasattr(self.model, "get_predictions") and model_type != "msm_regressor":
+        if hasattr(self.model, "get_predictions") and model_type != "msm":
             self.predict_method = self.model.get_predictions
         else:
             self.predict_method = self._predict_forward
@@ -127,7 +127,7 @@ class Predictor:
         temp_dataset = TemporaryDataset(data, scaling_params=self.scaling_params)
         
         # Realizar predicción
-        if self.model_type == "msm_regressor":
+        if self.model_type == "msm":
             # MSM: usar método get_predictions directamente
             predictions = self.model.get_predictions(temp_dataset)
         else:
@@ -160,7 +160,7 @@ class Predictor:
     def predict_n_step(self, data: Dict[str, Any], n_steps: int) -> np.ndarray:
         """Predicción multi-step"""
         # Si el modelo tiene método get_autoregressive_predictions
-        if hasattr(self.model, "get_autoregressive_predictions") and self.model_type != "msm_regressor":
+        if hasattr(self.model, "get_autoregressive_predictions") and self.model_type != "msm":
             from torch.utils.data import Dataset
             
             class TempAutoregDataset(Dataset):
